@@ -4,6 +4,17 @@ import pyttsx3
 import threading
 import queue
 import time
+import mediapipe as mp
+
+# Initialize MediaPipe Hands for zero-false-positive hand verification
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands_detector = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=1,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
 
 # --- 1. The Background Speech Worker ---
 speech_queue = queue.Queue()
@@ -120,17 +131,25 @@ while cap.isOpened():
     # Crop frame
     roi_frame = frame[y1:y2, x1:x2]
     
-    # Calculate skin color segmentation mask using YCrCb color space to verify hand presence
-    ycrcb = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2YCrCb)
-    lower_skin = (0, 133, 77)
-    upper_skin = (255, 173, 127)
-    skin_mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
-    roi_skin_ratio = cv2.countNonZero(skin_mask) / (roi_frame.shape[0] * roi_frame.shape[1])
+    # 1. Run MediaPipe Hands to detect 21-point hand landmarks inside roi_frame
+    roi_rgb = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2RGB)
+    hand_results = hands_detector.process(roi_rgb)
+    has_hand = hand_results.multi_hand_landmarks is not None
     
+    hand_box = None
+    if has_hand:
+        for landmarks in hand_results.multi_hand_landmarks:
+            mp_drawing.draw_landmarks(roi_frame, landmarks, mp_hands.HAND_CONNECTIONS)
+            xs = [lm.x * (x2 - x1) for lm in landmarks.landmark]
+            ys = [lm.y * (y2 - y1) for lm in landmarks.landmark]
+            hx1, hy1, hx2, hy2 = max(0, min(xs)), max(0, min(ys)), min(x2 - x1, max(xs)), min(y2 - y1, max(ys))
+            hand_box = (hx1, hy1, hx2, hy2)
+            break
+            
     # Set conf=0.20 to capture lower-confidence detections for display and debug printing
     results = model(roi_frame, conf=0.20, verbose=False)
 
-    # Analyze raw detections and check skin presence inside each bounding box
+    # Analyze raw detections and verify overlap with MediaPipe hand landmarks
     raw_dets = []
     speech_boxes = []
     
@@ -139,23 +158,29 @@ while cap.isOpened():
         c_score = float(box.conf[0].item())
         name = results[0].names[cls_id]
         
-        # Calculate skin percentage inside this specific bounding box
         bx1, by1, bx2, by2 = map(int, box.xyxy[0].tolist())
         bx1 = max(0, min(roi_frame.shape[1], bx1))
         bx2 = max(0, min(roi_frame.shape[1], bx2))
         by1 = max(0, min(roi_frame.shape[0], by1))
         by2 = max(0, min(roi_frame.shape[0], by2))
         
-        box_area = max(1, (bx2 - bx1) * (by2 - by1))
-        box_skin_ratio = cv2.countNonZero(skin_mask[by1:by2, bx1:bx2]) / box_area
+        # Check if this YOLO bounding box overlaps with the MediaPipe hand box
+        is_hand_overlap = False
+        if has_hand and hand_box is not None:
+            hx1, hy1, hx2, hy2 = hand_box
+            ix1 = max(bx1, hx1)
+            iy1 = max(by1, hy1)
+            ix2 = min(bx2, hx2)
+            iy2 = min(by2, hy2)
+            inter_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+            hand_area = max(1, (hx2 - hx1) * (hy2 - hy1))
+            overlap_ratio = inter_area / hand_area
+            is_hand_overlap = overlap_ratio >= 0.15
         
-        # A valid hand detection must have at least 15% skin pixels inside its box AND overall ROI must have >8% skin
-        is_skin_valid = (box_skin_ratio >= 0.15) and (roi_skin_ratio >= 0.08)
+        status_tag = "VALID" if (c_score >= 0.50 and is_hand_overlap) else ("NO_HAND" if not is_hand_overlap else "LOW_CONF")
+        raw_dets.append(f"{name.upper()} ({c_score:.2f} [{status_tag}])")
         
-        status_tag = "VALID" if (c_score >= 0.50 and is_skin_valid) else ("NO_SKIN" if not is_skin_valid else "LOW_CONF")
-        raw_dets.append(f"{name.upper()} ({c_score:.2f}, skin:{int(box_skin_ratio*100)}% [{status_tag}])")
-        
-        if c_score >= 0.50 and is_skin_valid:
+        if c_score >= 0.50 and is_hand_overlap:
             speech_boxes.append(box)
     
     if raw_dets:
