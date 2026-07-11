@@ -91,7 +91,7 @@ last_spoken_time = 0
 cooldown_seconds = 5.0 
 
 # Smoothing parameters to prevent flickering and random detections
-required_consecutive_frames = 8  # Sign must be detected for 8 consecutive frames (~0.3s) to trigger
+required_consecutive_frames = 12 # Sign must be detected for 12 consecutive frames (~0.4s) to trigger
 required_empty_frames = 10       # No sign detected for 10 frames (~0.4s) will reset state
 
 consecutive_detections = 0
@@ -154,7 +154,12 @@ while cap.isOpened():
     raw_dets = []
     speech_boxes = []
     
-    for box in results[0].boxes:
+    # Sort boxes descending by confidence to check margin between top candidates
+    sorted_boxes = sorted(results[0].boxes, key=lambda b: float(b.conf[0].item()), reverse=True)
+    top_score = float(sorted_boxes[0].conf[0].item()) if len(sorted_boxes) > 0 else 0.0
+    second_score = float(sorted_boxes[1].conf[0].item()) if len(sorted_boxes) > 1 else 0.0
+    
+    for box in sorted_boxes:
         cls_id = int(box.cls[0].item())
         c_score = float(box.conf[0].item())
         name = results[0].names[cls_id]
@@ -177,12 +182,22 @@ while cap.isOpened():
             hand_area = max(1, (hx2 - hx1) * (hy2 - hy1))
             overlap_ratio = inter_area / hand_area
             is_hand_overlap = overlap_ratio >= 0.15
+            
+        # A valid sign must have confidence >= 0.70, overlap with hand, AND not be an ambiguous wrong symbol
+        is_confident = (c_score >= 0.70)
+        is_unambiguous = (c_score - second_score >= 0.15) if (c_score == top_score and second_score > 0) else True
         
-        status_tag = "VALID" if (c_score >= 0.50 and is_hand_overlap) else ("NO_HAND" if not is_hand_overlap else "LOW_CONF")
-        raw_dets.append(f"{name.upper()} ({c_score:.2f} [{status_tag}])")
-        
-        if c_score >= 0.50 and is_hand_overlap:
+        if is_confident and is_hand_overlap and is_unambiguous:
+            status_tag = "VALID"
             speech_boxes.append(box)
+        elif not is_hand_overlap:
+            status_tag = "NO_HAND"
+        elif not is_confident:
+            status_tag = "LOW_CONF"
+        else:
+            status_tag = "AMBIGUOUS"
+            
+        raw_dets.append(f"{name.upper()} ({c_score:.2f} [{status_tag}])")
     
     if raw_dets:
         print(f"\r[YOLO Raw]: {', '.join(raw_dets)}                     ", end="", flush=True)
