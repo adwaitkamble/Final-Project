@@ -4,17 +4,6 @@ import pyttsx3
 import threading
 import queue
 import time
-import mediapipe as mp
-
-# Initialize MediaPipe Hands for zero-false-positive hand verification
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-hands_detector = mp_hands.Hands(
-    static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
 
 # --- 1. The Background Speech Worker ---
 speech_queue = queue.Queue()
@@ -131,25 +120,37 @@ while cap.isOpened():
     # Crop frame
     roi_frame = frame[y1:y2, x1:x2]
     
-    # 1. Run MediaPipe Hands to detect 21-point hand landmarks inside roi_frame
-    roi_rgb = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2RGB)
-    hand_results = hands_detector.process(roi_rgb)
-    has_hand = hand_results.multi_hand_landmarks is not None
+    # 1. OpenCV Contour & Skin Presence Verification (No external libraries required)
+    ycrcb = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2YCrCb)
+    lower_skin = (0, 133, 77)
+    upper_skin = (255, 173, 127)
+    skin_mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
     
+    # Clean up noise using morphological transformations
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+    skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    
+    # Find contours to check if a real, physical human hand is inside the box
+    contours, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    has_hand = False
     hand_box = None
-    if has_hand:
-        for landmarks in hand_results.multi_hand_landmarks:
-            mp_drawing.draw_landmarks(roi_frame, landmarks, mp_hands.HAND_CONNECTIONS)
-            xs = [lm.x * (x2 - x1) for lm in landmarks.landmark]
-            ys = [lm.y * (y2 - y1) for lm in landmarks.landmark]
-            hx1, hy1, hx2, hy2 = max(0, min(xs)), max(0, min(ys)), min(x2 - x1, max(xs)), min(y2 - y1, max(ys))
-            hand_box = (hx1, hy1, hx2, hy2)
-            break
+    if contours:
+        largest_contour = max(contours, key=cv2.contourArea)
+        max_area = cv2.contourArea(largest_contour)
+        # A human hand placed in a 300x300 box forms a solid contour >= 4500 pixels
+        if max_area >= 4500:
+            has_hand = True
+            hx, hy, hw, hh = cv2.boundingRect(largest_contour)
+            hand_box = (hx, hy, hx + hw, hy + hh)
+            cv2.rectangle(roi_frame, (hx, hy), (hx + hw, hy + hh), (0, 255, 0), 2)
+            cv2.putText(roi_frame, "Hand Tracked", (hx, max(20, hy - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             
     # Set conf=0.20 to capture lower-confidence detections for display and debug printing
     results = model(roi_frame, conf=0.20, verbose=False)
 
-    # Analyze raw detections and verify overlap with MediaPipe hand landmarks
+    # Analyze raw detections and verify overlap with tracked hand contour
     raw_dets = []
     speech_boxes = []
     
@@ -164,7 +165,7 @@ while cap.isOpened():
         by1 = max(0, min(roi_frame.shape[0], by1))
         by2 = max(0, min(roi_frame.shape[0], by2))
         
-        # Check if this YOLO bounding box overlaps with the MediaPipe hand box
+        # Check if this YOLO bounding box overlaps with the tracked hand contour
         is_hand_overlap = False
         if has_hand and hand_box is not None:
             hx1, hy1, hx2, hy2 = hand_box

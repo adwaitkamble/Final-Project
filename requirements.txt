@@ -1,7 +1,6 @@
-# Core Computer Vision & Hand Tracking
+# Core Computer Vision & Hand Contour Tracking
 opencv-python==5.0.0.93
 opencv-contrib-python==5.0.0.93
-mediapipe==0.10.35
 numpy==2.5.1
 pillow==12.3.0
 
