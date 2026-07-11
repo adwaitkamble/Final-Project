@@ -120,16 +120,43 @@ while cap.isOpened():
     # Crop frame
     roi_frame = frame[y1:y2, x1:x2]
     
+    # Calculate skin color segmentation mask using YCrCb color space to verify hand presence
+    ycrcb = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2YCrCb)
+    lower_skin = (0, 133, 77)
+    upper_skin = (255, 173, 127)
+    skin_mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
+    roi_skin_ratio = cv2.countNonZero(skin_mask) / (roi_frame.shape[0] * roi_frame.shape[1])
+    
     # Set conf=0.20 to capture lower-confidence detections for display and debug printing
     results = model(roi_frame, conf=0.20, verbose=False)
 
-    # Print raw detections to the console for debugging
+    # Analyze raw detections and check skin presence inside each bounding box
     raw_dets = []
+    speech_boxes = []
+    
     for box in results[0].boxes:
         cls_id = int(box.cls[0].item())
         c_score = float(box.conf[0].item())
         name = results[0].names[cls_id]
-        raw_dets.append(f"{name.upper()} ({c_score:.2f})")
+        
+        # Calculate skin percentage inside this specific bounding box
+        bx1, by1, bx2, by2 = map(int, box.xyxy[0].tolist())
+        bx1 = max(0, min(roi_frame.shape[1], bx1))
+        bx2 = max(0, min(roi_frame.shape[1], bx2))
+        by1 = max(0, min(roi_frame.shape[0], by1))
+        by2 = max(0, min(roi_frame.shape[0], by2))
+        
+        box_area = max(1, (bx2 - bx1) * (by2 - by1))
+        box_skin_ratio = cv2.countNonZero(skin_mask[by1:by2, bx1:bx2]) / box_area
+        
+        # A valid hand detection must have at least 15% skin pixels inside its box AND overall ROI must have >8% skin
+        is_skin_valid = (box_skin_ratio >= 0.15) and (roi_skin_ratio >= 0.08)
+        
+        status_tag = "VALID" if (c_score >= 0.50 and is_skin_valid) else ("NO_SKIN" if not is_skin_valid else "LOW_CONF")
+        raw_dets.append(f"{name.upper()} ({c_score:.2f}, skin:{int(box_skin_ratio*100)}% [{status_tag}])")
+        
+        if c_score >= 0.50 and is_skin_valid:
+            speech_boxes.append(box)
     
     if raw_dets:
         print(f"\r[YOLO Raw]: {', '.join(raw_dets)}                     ", end="", flush=True)
@@ -137,11 +164,8 @@ while cap.isOpened():
     # --- 5. The Audio & Terminal Logic (with Debouncing and Reset) ---
     current_time = time.time()
     
-    # Filter boxes that meet our confidence threshold for speech (e.g. 0.50)
-    speech_boxes = [box for box in results[0].boxes if float(box.conf[0].item()) >= 0.50]
-    
     if len(speech_boxes) > 0:
-        # A sign is detected with confidence >= 0.50
+        # A sign is detected with confidence >= 0.50 and confirmed skin presence
         class_id = int(speech_boxes[0].cls[0].item())
         detected_word = results[0].names[class_id]
         
