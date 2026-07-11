@@ -120,15 +120,29 @@ while cap.isOpened():
     # Crop frame
     roi_frame = frame[y1:y2, x1:x2]
     
-    # Set conf=0.50 to ignore low-confidence random background patterns
-    results = model(roi_frame, conf=0.50, verbose=False)
+    # Set conf=0.20 to capture lower-confidence detections for display and debug printing
+    results = model(roi_frame, conf=0.20, verbose=False)
+
+    # Print raw detections to the console for debugging
+    raw_dets = []
+    for box in results[0].boxes:
+        cls_id = int(box.cls[0].item())
+        c_score = float(box.conf[0].item())
+        name = results[0].names[cls_id]
+        raw_dets.append(f"{name.upper()} ({c_score:.2f})")
+    
+    if raw_dets:
+        print(f"\r[YOLO Raw]: {', '.join(raw_dets)}                     ", end="", flush=True)
 
     # --- 5. The Audio & Terminal Logic (with Debouncing and Reset) ---
     current_time = time.time()
     
-    if len(results[0].boxes) > 0:
-        # A sign is detected
-        class_id = int(results[0].boxes[0].cls[0].item())
+    # Filter boxes that meet our confidence threshold for speech (e.g. 0.50)
+    speech_boxes = [box for box in results[0].boxes if float(box.conf[0].item()) >= 0.50]
+    
+    if len(speech_boxes) > 0:
+        # A sign is detected with confidence >= 0.50
+        class_id = int(speech_boxes[0].cls[0].item())
         detected_word = results[0].names[class_id]
         
         consecutive_empty_frames = 0
