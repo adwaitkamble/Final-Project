@@ -85,10 +85,18 @@ if cap is None:
 
 print("Starting webcam... Press 'q' to quit.")
 
-# --- 3. Speech Tracking Variables ---
+# --- 3. Speech Tracking & Smoothing Variables ---
 last_spoken_word = ""
 last_spoken_time = 0
 cooldown_seconds = 5.0 
+
+# Smoothing parameters to prevent flickering and random detections
+required_consecutive_frames = 8  # Sign must be detected for 8 consecutive frames (~0.3s) to trigger
+required_empty_frames = 10       # No sign detected for 10 frames (~0.4s) will reset state
+
+consecutive_detections = 0
+current_candidate = ""
+consecutive_empty_frames = 0
 
 while cap.isOpened():
     success, frame = cap.read()
@@ -112,28 +120,47 @@ while cap.isOpened():
     # Crop frame
     roi_frame = frame[y1:y2, x1:x2]
     
-    # FIXED: Added verbose=False to keep the terminal output clean
-    results = model(roi_frame, conf=0.25, verbose=False)
+    # Set conf=0.50 to ignore low-confidence random background patterns
+    results = model(roi_frame, conf=0.50, verbose=False)
 
-    # --- 5. The Audio & Terminal Logic ---
+    # --- 5. The Audio & Terminal Logic (with Debouncing and Reset) ---
+    current_time = time.time()
+    
     if len(results[0].boxes) > 0:
+        # A sign is detected
         class_id = int(results[0].boxes[0].cls[0].item())
         detected_word = results[0].names[class_id]
         
-        current_time = time.time()
+        consecutive_empty_frames = 0
         
-        # New Sign Detected
-        if detected_word != last_spoken_word:
-            print(f"\n[DETECTED]: {detected_word.upper()}")
-            speech_queue.put(detected_word)
-            last_spoken_word = detected_word
-            last_spoken_time = current_time
+        if detected_word == current_candidate:
+            consecutive_detections += 1
+        else:
+            current_candidate = detected_word
+            consecutive_detections = 1
             
-        # Held Sign for 5 Seconds
-        elif (current_time - last_spoken_time) >= cooldown_seconds:
-            print(f"\n[REPEAT]: {detected_word.upper()}")
-            speech_queue.put(detected_word)
-            last_spoken_time = current_time
+        # Trigger speech if detection is stable (has persisted for enough frames)
+        if consecutive_detections >= required_consecutive_frames:
+            if current_candidate != last_spoken_word:
+                print(f"\n[DETECTED]: {current_candidate.upper()}")
+                speech_queue.put(current_candidate)
+                last_spoken_word = current_candidate
+                last_spoken_time = current_time
+            elif (current_time - last_spoken_time) >= cooldown_seconds:
+                print(f"\n[REPEAT]: {current_candidate.upper()}")
+                speech_queue.put(current_candidate)
+                last_spoken_time = current_time
+    else:
+        # No sign detected
+        consecutive_empty_frames += 1
+        consecutive_detections = 0
+        current_candidate = ""
+        
+        # Reset detection state if hand is removed for a short while
+        if consecutive_empty_frames >= required_empty_frames:
+            if last_spoken_word != "":
+                print("\n[INFO]: Hand removed, resetting detection state.")
+                last_spoken_word = ""
 
     annotated_roi = results[0].plot()
     frame[y1:y2, x1:x2] = annotated_roi
