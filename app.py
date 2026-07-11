@@ -9,12 +9,33 @@ import time
 speech_queue = queue.Queue()
 
 def speech_worker():
-    # SAPI5 engine requires COM library initialization when used in background threads on Windows
+    # Try using native Windows SAPI first (most stable in background threads on Windows)
+    try:
+        import win32com.client
+        import pythoncom
+        pythoncom.CoInitialize()
+        speaker = win32com.client.Dispatch("SAPI.SpVoice")
+        print("[AUDIO THREAD]: Using native Windows SAPI (SpVoice)")
+        while True:
+            text = speech_queue.get()
+            if text is None: break
+            try:
+                print(f"[AUDIO THREAD]: Attempting to say '{text.upper()}'")
+                speaker.Speak(text)
+            except Exception as e:
+                print(f"[AUDIO ERROR]: {e}")
+            speech_queue.task_done()
+        pythoncom.CoUninitialize()
+        return
+    except Exception as init_err:
+        print(f"[AUDIO THREAD]: SAPI initialization failed, falling back to pyttsx3. Error: {init_err}")
+
+    # Fallback to pyttsx3 (for non-Windows or if SAPI fails)
     try:
         import pythoncom
         pythoncom.CoInitialize()
-    except Exception as e:
-        print(f"[AUDIO THREAD COM INIT WARN]: {e}")
+    except Exception:
+        pass
         
     engine = pyttsx3.init()
     engine.setProperty('rate', 150)
@@ -22,7 +43,6 @@ def speech_worker():
         text = speech_queue.get()
         if text is None: break
         try:
-            # We added a debug print here so you know the audio thread is working!
             print(f"[AUDIO THREAD]: Attempting to say '{text.upper()}'")
             engine.say(text)
             engine.runAndWait()
